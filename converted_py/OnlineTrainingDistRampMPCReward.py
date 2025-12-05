@@ -1,0 +1,879 @@
+# Converted from OnlineTrainingDistRampMPCReward.ipynb
+from Simulation.mpc import *
+from Simulation.systemFunctions import DistillationColumnAspen
+from utils.helpers import *
+
+# System and Snapshot paths
+path = r"C:/Users\HAMEDI\Desktop\FinalDocuments\FinalDocuments\C2SplitterControlFiles\AspenFiles\dynsim\Plant\C2S_SS_simulation7.dynf"
+path_snaps = r"C:/Users\HAMEDI\Desktop\FinalDocuments\FinalDocuments\C2SplitterControlFiles\AspenFiles\dynsim\Plant\AM_C2S_SS_simulation7"
+
+# First initiate the system
+# Nominal Conditions
+nominal_conditions =  np.array([1.50032484e+05, -2.10309105e+01, 2.08083248e+01, 6.30485237e-01, 3.69514734e-01, -2.40000000e+01])
+
+# Steady State inputs
+ss_inputs = np.array([320000.0, 110.0])
+
+# Sampling time of the system
+delta_t = 1 / 6 # 10 mins
+
+# steady state values
+dl = DistillationColumnAspen(path, ss_inputs, nominal_conditions)
+steady_states={"ss_inputs":dl.ss_inputs,
+               "y_ss":dl.y_ss}
+print(steady_states)
+dl.close(path_snaps)
+
+dir_path = os.path.join(os.getcwd(), "Data")
+
+# Defining the range of setpoints for data generation
+setpoint_y = np.array([[0.002, -26.0],
+                       [0.05, -16.0]])
+u_min = np.array([300000.0, 100.0])
+u_max = np.array([460000, 150.0])
+
+system_data = load_and_prepare_system_data(steady_states=steady_states, setpoint_y=setpoint_y, u_min=u_min, u_max=u_max)
+
+A_aug = system_data["A_aug"]
+B_aug = system_data["B_aug"]
+C_aug = system_data["C_aug"]
+
+data_min = system_data["data_min"]
+data_max = system_data["data_max"]
+
+min_max_states = system_data["min_max_states"]
+
+y_sp_scaled_deviation = system_data["y_sp_scaled_deviation"]
+
+b_min = system_data["b_min"]
+b_max = system_data["b_max"]
+
+min_max_dict = system_data["min_max_dict"]
+
+# Setpoints in deviation form
+inputs_number = int(B_aug.shape[1])
+y_sp_scenario = np.array([[0.013, -23.],
+                         [0.018, -22.]])
+
+y_sp_scenario = (apply_min_max(y_sp_scenario, data_min[inputs_number:], data_max[inputs_number:])
+                 - apply_min_max(steady_states["y_ss"], data_min[inputs_number:], data_max[inputs_number:]))
+
+n_tests = 200
+set_points_len = 200
+TEST_CYCLE = [False, False, False, False, False]
+warm_start = 10
+ACTOR_FREEZE = 10 * set_points_len
+warm_start_plot = warm_start * 2 * set_points_len + ACTOR_FREEZE
+
+# # # Observer Gain
+poles = np.array([0.032, 0.03501095, 0.04099389, 0.04190188, 0.07477281,
+                  0.01153274, 0.41036367])
+L = compute_observer_gain(A_aug, C_aug, poles)
+# L
+# # Observer Gain
+# poles = np.array([0.032, 0.03501095, 0.04099389, 0.04190188, 0.07477281,
+#                   0.5153274, 0.61036367])
+# # poles = np.array([0.6, 0.6, 0.55, 0.5, 0.5, 0.98, 0.95])
+# L = compute_observer_gain(A_aug, C_aug, poles)
+L
+
+def generate_disturbance_sequence(
+    total_steps: int,
+    nominal: float,
+) -> np.ndarray:
+
+    seq = np.linspace(nominal, 154000, total_steps)
+
+    return seq
+
+seq = generate_disturbance_sequence(
+    total_steps        = 200_000,
+    nominal            = 1.50032484e+05,
+)
+plt.plot(seq, lw=0.5)
+plt.xlabel("Sample")
+plt.ylabel("Feed flow")
+plt.show()
+
+from TD3Agent.agent import TD3Agent
+import torch
+
+set_points_number = int(C_aug.shape[0])
+STATE_DIM = int(A_aug.shape[0]) + set_points_number + inputs_number
+ACTION_DIM = int(B_aug.shape[1])
+n_outputs = C_aug.shape[0]
+ACTOR_LAYER_SIZES = [512, 512, 512, 512, 512]
+CRITIC_LAYER_SIZES = [512, 512, 512, 512, 512]
+# ACTOR_LAYER_SIZES = [256, 256, 256]
+# CRITIC_LAYER_SIZES = [256, 256, 256]
+BUFFER_CAPACITY = 200000
+ACTOR_LR = 1e-4
+CRITIC_LR = 1e-3
+SMOOTHING_STD = 0.02
+NOISE_CLIP = 0.05
+# EXPLORATION_NOISE_STD = 0.01
+GAMMA = 0.995
+TAU = 0.005 # 0.01
+MAX_ACTION = 1
+POLICY_DELAY = 2
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+BATCH_SIZE = 1024
+STD_START = 0.04
+STD_END = 0.0
+STD_DECAY_RATE = 0.999999
+STD_DECAY_MODE = "exp"
+
+td3_agent = TD3Agent(
+    state_dim=STATE_DIM,
+    action_dim=ACTION_DIM,
+    actor_hidden=ACTOR_LAYER_SIZES,
+    critic_hidden=CRITIC_LAYER_SIZES,
+    gamma=GAMMA,
+    actor_lr=ACTOR_LR,
+    critic_lr=CRITIC_LR,
+    batch_size=BATCH_SIZE,
+    policy_delay=POLICY_DELAY,
+    target_policy_smoothing_noise_std=SMOOTHING_STD,
+    noise_clip=NOISE_CLIP,
+    max_action=MAX_ACTION,
+    tau=TAU,
+    std_start=STD_START,
+    std_end=STD_END,
+    std_decay_rate=STD_DECAY_RATE,
+    std_decay_mode=STD_DECAY_MODE,
+    buffer_size=BUFFER_CAPACITY,
+    device=DEVICE,
+    actor_freeze=ACTOR_FREEZE,
+    mode="mpc"
+    )
+
+agent_path = r"C:/Users\HAMEDI\OneDrive - McMaster University\PythonProjects\distillationColumnRL\Data\models/agent_2507131207.pkl"
+# agent_path = r"C:\Users\HAMEDI\Desktop\DistillRL\Data/models\td3_20251017_143115.pkl"
+td3_agent.load(agent_path)
+
+# MPC parameters
+predict_h = 6
+cont_h = 3
+b1 = (b_min[0], b_max[0])
+b2 = (b_min[1], b_max[1])
+bnds = (b1, b2)*cont_h
+cons = []
+IC_opt = np.zeros(inputs_number*cont_h)
+Q1_penalty = 1.
+Q2_penalty = 1.
+R1_penalty = 1.
+R2_penalty = 1.
+
+MPC_obj = MpcSolver(A_aug, B_aug, C_aug,
+                    Q1_penalty, Q2_penalty, R1_penalty, R2_penalty,
+                    predict_h, cont_h)
+
+def reward_fn(delta_y, delta_u, Q1_penalty=1, Q2_penalty=1, R1_penalty=1, R2_penalty=1):
+
+    # Reward Calculation
+    reward = - (Q1_penalty * delta_y[0] ** 2 + Q2_penalty * delta_y[1] ** 2 +
+                R1_penalty * delta_u[0] ** 2 + R2_penalty * delta_u[1] ** 2)
+
+    return reward
+
+def run_rl_train(system, y_sp_scenario, n_tests, set_points_len,
+                 steady_states, min_max_dict, agent, MPC_obj,
+                 L, data_min, data_max, warm_start,
+                 test_cycle,
+                 reward_fn):
+
+    # defining setpoints
+    y_sp, nFE, sub_episodes_changes_dict, time_in_sub_episodes, test_train_dict, WARM_START = generate_setpoints_training_rl(
+        y_sp_scenario, n_tests, set_points_len, warm_start, test_cycle)
+
+    # inputs and outputs of the system dimensions
+    n_inputs = B_aug.shape[1]
+    n_outputs = C_aug.shape[0]
+    n_states = A_aug.shape[0]
+
+    # Scaled steady states inputs and outputs
+    ss_scaled_inputs = apply_min_max(steady_states["ss_inputs"], data_min[:n_inputs], data_max[:n_inputs])
+    y_ss_scaled = apply_min_max(steady_states["y_ss"], data_min[n_inputs:], data_max[n_inputs:])
+    u_min, u_max = min_max_dict["u_min"], min_max_dict["u_max"]
+
+    y_system = np.zeros((nFE + 1, n_outputs))
+    y_system[0, :] = system.current_output
+    u_rl = np.zeros((nFE, n_inputs))
+    yhat = np.zeros((n_outputs, nFE))
+    xhatdhat = np.zeros((n_states, nFE + 1))
+    xhatdhat[:, 0] = np.random.uniform(low=min_max_dict["x_min"], high=min_max_dict["x_max"])
+    rewards = np.zeros(nFE)
+    avg_rewards = []
+
+    delta_y_storage = []
+
+    # Disturbances
+    dist = generate_disturbance_sequence(
+        total_steps=nFE,
+        nominal=1.50032484e+05,
+    )
+
+    # ----- helper ------
+    def map_to_bounds(a, low, high):
+        return low + ((a + 1.0) / 2.0) * (high - low)
+    test = False
+
+    for i in range(nFE):
+        # train/test phase
+        if i in test_train_dict:
+            test = test_train_dict[i]
+
+        # Current scaled input & deviation
+        scaled_current_input = apply_min_max(system.current_input, data_min[:n_inputs], data_max[:n_inputs])
+        scaled_current_input_dev = scaled_current_input - ss_scaled_inputs
+
+        # ---- RL state (scaled) ----
+        current_rl_state = apply_rl_scaled(min_max_dict, xhatdhat[:, i], y_sp[i, :], scaled_current_input_dev)
+
+        # ---- TD3 action ----
+        if not test:
+            action = agent.take_action(current_rl_state, explore=(not test))
+        else:
+            action = agent.act_eval(current_rl_state)
+        # Map to bounds
+        u_scaled = map_to_bounds(action, u_min, u_max)
+
+        # scale & step plant
+        u_rl[i, :] = u_scaled + ss_scaled_inputs
+        u_plant = reverse_min_max(u_rl[i, :], data_min[:n_inputs], data_max[:n_inputs])
+
+        # delta u cost variables
+        delta_u = u_rl[i, :] - scaled_current_input
+
+        # Apply to plant and step
+        system.current_input = u_plant
+        # Step the system with disturbance included
+        system.step(disturbances=np.array([dist[i]]))
+
+        # Record output
+        y_system[i+1, :] = system.current_output
+
+        # ----- Observer & model roll -----
+        y_current_scaled = apply_min_max(y_system[i+1, :], data_min[n_inputs:], data_max[n_inputs:]) - y_ss_scaled
+        y_prev_scaled = apply_min_max(y_system[i, :], data_min[n_inputs:], data_max[n_inputs:]) - y_ss_scaled
+
+        # Calculate Delta y in deviation form
+        delta_y = y_current_scaled - y_sp[i, :]
+
+        # Calculate the next state in deviation form
+        yhat[:, i] = np.dot(MPC_obj.C, xhatdhat[:, i])
+        xhatdhat[:, i+1] = np.dot(MPC_obj.A, xhatdhat[:, i]) + np.dot(MPC_obj.B, (u_rl[i, :] - ss_scaled_inputs)) + np.dot(L, (y_prev_scaled - yhat[:, i])).T
+
+
+        # Reward Calculation
+        reward = reward_fn(delta_y, delta_u)
+
+        # Record rewards and delta_y
+        rewards[i] = reward
+        delta_y_storage.append(np.abs(delta_y))
+
+        # ----- Next state for TD3 -----
+        next_u_dev = u_rl[i, :] - ss_scaled_inputs
+        next_rl_state = apply_rl_scaled(min_max_dict, xhatdhat[:, i+1], y_sp[i, :], next_u_dev)
+
+        # Episode boundary (treat each setpoint block as an episode end)
+        done = 0.0
+
+        # Buffer + train (skip if in test phase)
+        if not test:
+            agent.push(current_rl_state,
+                       action.astype(np.float32),
+                       float(reward),
+                       next_rl_state,
+                       float(done))
+            if i >= WARM_START:
+                _ = agent.train_step()  # returns loss or None
+
+        # diagnostics at sub-episode boundary
+        if i in sub_episodes_changes_dict:
+            avg_rewards.append(np.mean(rewards[max(0, i - time_in_sub_episodes + 1): i + 1]))
+            print('Sub_Episode:', sub_episodes_changes_dict[i], '| avg. reward:', avg_rewards[-1])
+            if hasattr(agent, "_expl_sigma"):
+                print('Exploration noise:', agent._expl_sigma)
+
+    # unscale to plant units for plotting
+    u_rl = reverse_min_max(u_rl, data_min[:n_inputs], data_max[:n_inputs])
+
+    return y_system, u_rl, avg_rewards, rewards, xhatdhat, nFE, time_in_sub_episodes, y_sp, yhat, delta_y_storage, dist
+
+dl = DistillationColumnAspen(path, ss_inputs, nominal_conditions)
+
+y_system, u_rl, avg_rewards, rewards, xhatdhat, nFE, time_in_sub_episodes, y_sp, yhat, delta_y_storage, dist\
+    = run_rl_train(dl, y_sp_scenario, n_tests, set_points_len,
+                 steady_states, min_max_dict, td3_agent, MPC_obj,
+                 L, data_min, data_max, warm_start,
+                 TEST_CYCLE,
+                 reward_fn)
+
+dl.close(path_snaps)
+
+def plot_rl_results_disturbance(
+    y_sp, steady_states, nFE, delta_t, time_in_sub_episodes,
+    y_mpc, u_mpc, avg_rewards, data_min, data_max, warm_start_plot,
+    directory=None, prefix_name="agent_result",
+    agent=None,                 # expects .actor_losses, .critic_losses (lists/arrays)
+    delta_y_storage=None,       # list/array of shape (N, 2)
+    rewards=None,               # per-step rewards, 1D
+    dist=None   # kept for completeness, but not plotted
+):
+    """
+    Plot RL results with warm-start shading; save all inputs + figures
+    into directory/prefix_name/<timestamp>. Also plots optional losses,
+    delta_y windows, and per-step rewards when provided.
+    NOTE: figures are saved only; not shown.
+    Returns
+    -------
+    out_dir : str
+        The folder where inputs and figures were saved.
+    """
+    import os, pickle
+    from datetime import datetime
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    # ---------- output directory ----------
+    if directory is None:
+        directory = os.getcwd()
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_dir = os.path.join(directory, prefix_name, timestamp)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ---------- helper: save current figure (no show) ----------
+    def _savefig(name):
+        plt.tight_layout()
+        plt.savefig(os.path.join(out_dir, name), bbox_inches='tight', dpi=300)
+        plt.close()
+
+    # ---------- preserve originals & pack inputs ----------
+    y_sp_original = np.array(y_sp, copy=True)  # before conversion
+
+    actor_losses = getattr(agent, "actor_losses", None) if agent is not None else None
+    critic_losses = getattr(agent, "critic_losses", None) if agent is not None else None
+    dy_arr = np.array(delta_y_storage) if delta_y_storage is not None else None
+    rewards_arr = np.array(rewards) if rewards is not None else None
+
+    input_data = {
+        "y_sp": y_sp_original,             # original (scaled deviation)
+        "steady_states": steady_states,
+        "nFE": nFE,
+        "delta_t": delta_t,
+        "time_in_sub_episodes": time_in_sub_episodes,
+        "y_mpc": y_mpc,
+        "u_mpc": u_mpc,
+        "avg_rewards": avg_rewards,
+        "data_min": data_min,
+        "data_max": data_max,
+        "warm_start_plot": warm_start_plot,
+        "actor_losses": actor_losses,
+        "critic_losses": critic_losses,
+        "delta_y_storage": dy_arr,
+        "rewards": rewards_arr,
+        "dist": dist,
+    }
+    with open(os.path.join(out_dir, 'input_data.pkl'), 'wb') as f:
+        pickle.dump(input_data, f)
+
+    # ---------- your original plotting code (unchanged logic; save-only) ----------
+    # Canceling the deviation form (unchanged logic)
+    y_ss = apply_min_max(steady_states["y_ss"], data_min[2:], data_max[2:])
+    y_sp = (y_sp + y_ss)
+    y_sp = (reverse_min_max(y_sp, data_min[2:], data_max[2:])).T
+
+    # -------- visual style only --------
+    import matplotlib as mpl
+    mpl.rcParams.update({
+        "font.size": 12,
+        "axes.grid": True,
+        "grid.linestyle": "--",
+        "grid.linewidth": 0.6,
+        "grid.alpha": 0.35,
+        "legend.frameon": True,    # solid white legend box
+    })
+    # Distinct, colorblind-safe colors
+    C_RL = "tab:blue"
+    C_SP = "tab:red"
+    C_QC = "tab:green"
+    C_QM = "tab:orange"
+    C_RW = "tab:purple"
+
+    ####### Plot 1  ###############
+    time_plot = np.linspace(0, nFE * delta_t, nFE + 1)
+    warm_start_plot = np.atleast_1d(warm_start_plot) * delta_t
+    ws_end = float(warm_start_plot.max())
+
+    time_plot_hour = np.linspace(0, time_in_sub_episodes * delta_t, time_in_sub_episodes + 1)
+
+    from matplotlib.patches import Patch
+    import matplotlib.ticker as mtick
+
+    plt.figure(figsize=(10, 8))
+
+    # First subplot
+    ax = plt.subplot(2, 1, 1)
+    ax.plot(time_plot[10:], y_mpc[10:, 0], 'b-', lw=2, label=r'$\mathbf{RL}$', zorder=2)
+    ax.step(time_plot[10:-1], y_sp[0, 10:], 'r--', lw=2, label=r'$\mathbf{Setpoint}$', where='post', zorder=3)
+    for t_ws in warm_start_plot:
+        ax.axvline(t_ws, color='k', linestyle='--', linewidth=1.2, zorder=1)
+    ax.axvspan(0.0, ws_end, facecolor='0.9', alpha=0.6, zorder=0)
+    ax.set_ylabel(r'$\mathbf{\eta}$ (L/g)', fontsize=18)
+    ax.grid(True)
+    ax.set_xlim(0, time_plot[-1])
+    ax.xaxis.set_major_locator(mtick.MaxNLocator(6))
+    ax.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter('%d'))
+    ax.tick_params(axis='x', pad=4)
+    h, l = ax.get_legend_handles_labels()
+    ax.legend([Patch(facecolor='0.9', edgecolor='none', label='Warm start')] + h,
+              ['Warm start'] + l,
+              loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0.,
+              frameon=True, fontsize=16)
+
+    # Second subplot
+    ax = plt.subplot(2, 1, 2)
+    ax.plot(time_plot[10:], y_mpc[10:, 1], 'b-', lw=2, label=r'$\mathbf{RL}$', zorder=2)
+    ax.step(time_plot[10:-1], y_sp[1, 10:], 'r--', lw=2, label=r'$\mathbf{Setpoint}$', where='post', zorder=3)
+    for t_ws in warm_start_plot:
+        ax.axvline(t_ws, color='k', linestyle='--', linewidth=1.2, zorder=1)
+    ax.axvspan(0.0, ws_end, facecolor='0.9', alpha=0.6, zorder=0)
+    ax.set_ylabel(r'$\mathbf{T}$ (K)', fontsize=18)
+    ax.set_xlabel(r'$\mathbf{Time}$ (hour)', fontsize=18)
+    ax.grid(True)
+    ax.set_xlim(0, time_plot[-1])
+    ax.xaxis.set_major_locator(mtick.MaxNLocator(6))
+    ax.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter('%d'))
+    ax.tick_params(axis='x', pad=4)
+    h, l = ax.get_legend_handles_labels()
+    ax.legend([Patch(facecolor='0.9', edgecolor='none', label='Warm start')] + h,
+              ['Warm start'] + l,
+              loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0.,
+              frameon=True, fontsize=16)
+
+    plt.subplot(2, 1, 1); plt.tick_params(axis='both', labelsize=16)
+    plt.subplot(2, 1, 2); plt.tick_params(axis='both', labelsize=16)
+    plt.gcf().subplots_adjust(right=0.82, bottom=0.12)
+    _savefig('fig_rl_outputs_full.png')
+
+    ########### last window (= time_in_sub_episodes) ##########
+    plt.figure(figsize=(7.6, 5.2))
+    ax = plt.subplot(2, 1, 1)
+    ax.plot(time_plot_hour, y_mpc[nFE - time_in_sub_episodes:, 0], '-', lw=2.2, color=C_RL, label=r'RL', zorder=2)
+    ax.step(time_plot_hour[:-1], y_sp[0, nFE - time_in_sub_episodes:], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label=r'Setpoint', zorder=3)
+    ax.set_ylabel(r'$\eta$ (L/g)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    ax = plt.subplot(2, 1, 2)
+    ax.plot(time_plot_hour, y_mpc[nFE - time_in_sub_episodes:, 1], '-', lw=2.2, color=C_RL, label=r'RL', zorder=2)
+    ax.step(time_plot_hour[:-1], y_sp[1, nFE - time_in_sub_episodes:], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label=r'Setpoint', zorder=3)
+    ax.set_ylabel(r'$T$ (K)'); ax.set_xlabel(r'Time (h)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    plt.gcf().subplots_adjust(right=0.82)
+    _savefig(f'fig_rl_outputs_last{time_in_sub_episodes}.png')
+
+    ########### last 4×window ##########
+    plt.figure(figsize=(7.6, 5.2))
+    time_plot_4w = np.linspace(0, 4 * time_in_sub_episodes * delta_t, 4 * time_in_sub_episodes + 1)
+
+    ax = plt.subplot(2, 1, 1)
+    ax.plot(time_plot_4w, y_mpc[nFE - 4 * time_in_sub_episodes:, 0], '-', lw=2.2, color=C_RL, label=r'RL', zorder=2)
+    ax.step(time_plot_4w[:-1], y_sp[0, nFE - 4 * time_in_sub_episodes:], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label=r'Setpoint', zorder=3)
+    ax.set_ylabel(r'$\eta$ (L/g)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    ax = plt.subplot(2, 1, 2)
+    ax.plot(time_plot_4w, y_mpc[nFE - 4 * time_in_sub_episodes:, 1], '-', lw=2.2, color=C_RL, label=r'RL', zorder=2)
+    ax.step(time_plot_4w[:-1], y_sp[1, nFE - 4 * time_in_sub_episodes:], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label=r'Setpoint', zorder=3)
+    ax.set_ylabel(r'$T$ (K)'); ax.set_xlabel(r'Time (h)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    plt.gcf().subplots_adjust(right=0.82)
+    _savefig(f'fig_rl_outputs_last{4*time_in_sub_episodes}.png')
+
+    ####### Plot 2  (inputs) ###############
+    plt.figure(figsize=(7.6, 5.2))
+    ax = plt.subplot(2, 1, 1)
+    ax.step(time_plot[:-1], u_mpc[:, 0], where='post', lw=2.2, color=C_QC, label=r'$Q_c$', zorder=2)
+    ax.set_ylabel(r'$Q_c$ (L/h)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    ax = plt.subplot(2, 1, 2)
+    ax.step(time_plot[:-1], u_mpc[:, 1], where='post', lw=2.2, color=C_QM, label=r'$Q_m$', zorder=2)
+    ax.set_ylabel(r'$Q_m$ (L/h)'); ax.set_xlabel(r'Time (h)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0), borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    plt.gcf().subplots_adjust(right=0.82)
+    _savefig('fig_rl_inputs_full.png')
+
+    ############# Plot 3 (Reward per episode) #######################
+    plt.figure(figsize=(7.2, 4.2))
+    xep = np.arange(1, len(avg_rewards) + 1)
+    plt.plot(xep, avg_rewards, 'o-', lw=2.2, color=C_RW, label='Reward per Episode', zorder=2)
+    plt.ylabel('Avg. Reward')
+    plt.xlabel('Episode #')
+    plt.grid(True, which='both', linestyle='--', linewidth=0.6, alpha=0.35)
+    ax = plt.gca()
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.legend(loc='lower right', framealpha=1.0, facecolor='white')
+    _savefig('fig_rl_rewards.png')
+
+    # ---------- optional losses ----------
+    if actor_losses is not None and len(actor_losses) > 0:
+        plt.figure(figsize=(7.2, 4.2))
+        plt.plot(actor_losses, lw=1.8, color='tab:blue')
+        plt.ylabel('Actor Loss'); plt.xlabel('Update Step'); plt.grid(True, linestyle='--', alpha=0.35)
+        _savefig('loss_actor.png')
+
+    if critic_losses is not None and len(critic_losses) > 0:
+        plt.figure(figsize=(7.2, 4.2))
+        plt.plot(critic_losses, lw=1.8, color='tab:orange')
+        plt.ylabel('Critic Loss'); plt.xlabel('Update Step'); plt.grid(True, linestyle='--', alpha=0.35)
+        _savefig('loss_critic.png')
+
+    # ---------- optional delta_y windows ----------
+    if dy_arr is not None and dy_arr.ndim == 2 and dy_arr.shape[1] >= 2:
+        n = dy_arr.shape[0]
+
+        # last 300
+        i0 = max(0, n-300); w = dy_arr[i0:n]
+        if len(w) > 0:
+            plt.figure(figsize=(7.6, 4.2))
+            plt.plot(w[:, 0], c='r', label=r'$\Delta y_1$')
+            plt.plot(w[:, 1], c='b', label=r'$\Delta y_2$')
+            plt.ylabel(r'$\Delta y$'); plt.xlabel('Step'); plt.legend(); plt.grid(True, linestyle='--', alpha=0.35)
+            _savefig('delta_y_last300.png')
+
+        # slice [-700:-400]
+        j0 = max(0, n-700); j1 = max(0, n-400)
+        w2 = dy_arr[j0:j1]
+        if len(w2) > 0:
+            plt.figure(figsize=(7.6, 4.2))
+            plt.plot(w2[:, 0], c='r', label=r'$\Delta y_1$')
+            plt.plot(w2[:, 1], c='b', label=r'$\Delta y_2$')
+            plt.ylabel(r'$\Delta y$'); plt.xlabel('Step'); plt.legend(); plt.grid(True, linestyle='--', alpha=0.35)
+            _savefig('delta_y_700_400.png')
+
+    # ---------- optional per-step rewards ----------
+    if rewards_arr is not None and rewards_arr.ndim == 1 and rewards_arr.size > 0:
+        n = rewards_arr.size
+        # [-700:-400]
+        j0 = max(0, n-700); j1 = max(0, n-400); w = rewards_arr[j0:j1]
+        if w.size > 0:
+            plt.figure(figsize=(7.6, 4.2))
+            plt.scatter(range(w.size), w, s=10)
+            plt.ylabel('Reward'); plt.xlabel('Step'); plt.grid(True, linestyle='--', alpha=0.35)
+            _savefig('rewards_700_400.png')
+
+        # last 300
+        i0 = max(0, n-300); w2 = rewards_arr[i0:n]
+        if w2.size > 0:
+            plt.figure(figsize=(7.6, 4.2))
+            plt.scatter(range(w2.size), w2, s=10)
+            plt.ylabel('Reward'); plt.xlabel('Step'); plt.grid(True, linestyle='--', alpha=0.35)
+            _savefig('rewards_last300.png')
+
+        # full
+        plt.figure(figsize=(7.6, 4.2))
+        plt.scatter(range(rewards_arr.size), rewards_arr, s=10)
+        plt.ylabel('Reward'); plt.xlabel('Step'); plt.grid(True, linestyle='--', alpha=0.35)
+        _savefig('rewards_all.png')
+
+    # ---------- disturbance ----------
+    if dist is not None:
+        plt.figure(figsize=(7.2, 4.2))
+        plt.plot(time_plot[10:], dist[9:], lw=1.8, color='tab:blue')
+        plt.ylabel('Reflux (Kg/h)'); plt.xlabel('Time (hour)'); plt.grid(True, linestyle='--', alpha=0.35)
+        _savefig('feed_dist.png')
+
+    return out_dir
+
+out_dir = plot_rl_results_disturbance(
+    y_sp, steady_states, nFE, delta_t, time_in_sub_episodes,
+    y_system, u_rl, avg_rewards, data_min, data_max, warm_start_plot,
+    directory=dir_path, prefix_name="dl_disturb",
+    agent=td3_agent, delta_y_storage=delta_y_storage, rewards=rewards,
+    dist=dist
+)
+print("Saved to:", out_dir)
+
+save_path = os.path.join(dir_path, "mpc_results.pickle")
+with open(save_path, 'rb') as file:
+    mpc_results = pickle.load(file)
+y_mpc = mpc_results["y_mpc"]
+u_mpc = mpc_results["u_mpc"]
+avg_rewards_ = mpc_results["avg_rewards"]
+avg_rewards_mpc = mpc_results["avg_rewards_mpc"]
+
+def compare_mpc_rl(y_rl, y_mpc, y_sp, avg_rewards_rl, avg_rewards_mpc,
+                   delta_t, directory, prefix_name):
+    """
+    Plots last-portion comparison (RL vs MPC vs Setpoint) and reward curves.
+    Saves to:
+      - outputs_compare.(png|pdf)
+      - reward_compare.(png|pdf)
+    Data logic and inputs remain yours.
+    """
+    # ---------- output directory ----------
+    import os, pickle
+    from datetime import datetime
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    out_dir = os.path.join(directory, prefix_name, timestamp)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # ---------- helper: save current figure (PNG + PDF; no show) ----------
+    import matplotlib.pyplot as plt
+    def _savefig(name_png):
+        plt.tight_layout()
+        full_png = os.path.join(out_dir, name_png)
+        plt.savefig(full_png, bbox_inches='tight', dpi=300)
+        base, _ = os.path.splitext(full_png)
+        plt.savefig(base + '.pdf', bbox_inches='tight')
+        plt.close()
+
+    start_idx = -800
+
+    # --- Setpoint back to real units (your convention) ---
+    y_ss = apply_min_max(steady_states["y_ss"], data_min[2:], data_max[2:])
+    y_sp = (y_sp + y_ss)
+    y_sp = (reverse_min_max(y_sp, data_min[2:], data_max[2:])).T  # shape (nFE, 2)
+
+    import matplotlib as mpl
+    import matplotlib.ticker as mtick
+    import numpy as np
+
+    mpl.rcParams.update({
+        "font.size": 12,
+        "axes.grid": True,
+        "grid.linestyle": "--",
+        "grid.linewidth": 0.6,
+        "grid.alpha": 0.35,
+        "legend.frameon": True,
+    })
+
+    # Colors/styles (colorblind-safe)
+    C_RL = "tab:blue"
+    C_MPC = "black"
+    C_SP = "tab:red"
+
+    # --- Tail slices (keep your start_idx; align lengths for line vs step) ---
+    y_rl_tail  = np.asarray(y_rl[start_idx:, :],  float)    # (L_line, 2)
+    y_mpc_tail = np.asarray(y_mpc[start_idx:, :], float)    # (L_line, 2)
+    sp_tail    = np.asarray(y_sp[start_idx:, :],  float)    # (2, W_step)
+
+    # Determine aligned window W where step has W and lines have W+1 samples
+    L_line = min(y_rl_tail.shape[0], y_mpc_tail.shape[0])
+    W_step = sp_tail.shape[1]
+    W = min(W_step, L_line - 1)  # ensure consistent time base
+
+    # Crop to aligned sizes
+    y_rl_tail  = y_rl_tail[-(W + 1):, :]
+    y_mpc_tail = y_mpc_tail[-(W + 1):, :]
+    sp_tail    = sp_tail[:, -W:]               # (2, W)
+
+    # Time bases (hours): line has W+1, step has W (post-hold)
+    t_line = np.linspace(0, W * delta_t, W + 1)
+    t_step = t_line[:-1]
+
+    # ---------------- Outputs compare (last W) ----------------
+    fig, axs = plt.subplots(2, 1, figsize=(7.6, 5.2), sharex=True)
+
+    # Tray 23 C2H6 composition
+    ax = axs[0]
+    ax.plot(t_line, y_rl_tail[:, 0], '-',  lw=2.2, color=C_RL,  label="RL",  zorder=2)
+    ax.plot(t_line, y_mpc_tail[:, 0], '--', lw=2.2, color=C_MPC, label="MPC", zorder=2)
+    ax.step(t_step, sp_tail[0, :], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label="Setpoint", zorder=3)
+    ax.set_ylabel(r'$x_{23,\mathrm{C_2H_6}}$ (–)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, t_line[-1])
+    ax.xaxis.set_major_locator(mtick.MaxNLocator(6))
+    ax.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter('%.1f'))
+    ax.tick_params(axis='x', pad=4)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0),
+              borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    # Tray 85 temperature
+    ax = axs[1]
+    ax.plot(t_line, y_rl_tail[:, 1], '-',  lw=2.2, color=C_RL,  label="RL",  zorder=2)
+    ax.plot(t_line, y_mpc_tail[:, 1], '--', lw=2.2, color=C_MPC, label="MPC", zorder=2)
+    ax.step(t_step, sp_tail[1, :], where='post', linestyle='--', lw=2.2, color=C_SP, alpha=0.95, label="Setpoint", zorder=3)
+    ax.set_ylabel(r'$T_{85}$ (K)'); ax.set_xlabel('Time (h)')
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.set_xlim(0, t_line[-1])
+    ax.xaxis.set_major_locator(mtick.MaxNLocator(6))
+    ax.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    ax.xaxis.set_major_formatter(mtick.FormatStrFormatter('%.1f'))
+    ax.tick_params(axis='x', pad=4)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.01, 1.0),
+              borderaxespad=0., framealpha=1.0, facecolor='white')
+
+    plt.gcf().subplots_adjust(right=0.82)
+    fig.tight_layout()
+    _savefig('outputs_compare.png')
+
+    # ---------------- Rewards: full with outside inset (legend outside) ----------------
+    from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.6))
+
+    # main plot
+    x_main = np.arange(1, len(avg_rewards_rl))
+    ax.plot(x_main, avg_rewards_rl[1:], 'o-', lw=2, ms=4, color='tab:blue',   label='RL')
+    ax.hlines(avg_rewards_mpc[-1], xmin=x_main[0], xmax=x_main[-1],
+              color='tab:orange', linestyle='--', lw=2, label='MPC')
+
+    ax.set_ylabel('Avg. Reward')
+    ax.set_xlabel('Episode #')
+    ax.grid(True, linestyle='--', alpha=0.35)
+    ax.spines['top'].set_visible(False); ax.spines['right'].set_visible(False)
+    ax.xaxis.set_major_locator(mtick.MaxNLocator(8, integer=True))
+    ax.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+
+    # legend OUTSIDE (right)
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1.0),
+              borderaxespad=0., frameon=True, facecolor='white')
+
+    # inset: CENTER RIGHT just outside the axes
+    axins = zoomed_inset_axes(
+        ax, zoom=2.0, loc='center right',
+        bbox_to_anchor=(1.02, 0.5),   # outside, vertically centered
+        bbox_transform=ax.transAxes,
+        borderpad=0.0
+    )
+
+    # inset data (same as main)
+    axins.plot(x_main, avg_rewards_rl[1:], 'o-', lw=1.8, ms=3.5, color='tab:blue')
+    axins.hlines(avg_rewards_mpc[-1], xmin=x_main[0], xmax=x_main[-1],
+                 color='tab:orange', linestyle='--', lw=1.8)
+
+    # zoom window (edit these only)
+    x1, x2, y1, y2 = 70, 85, 30, 60
+    axins.set_xlim(x1, x2)
+    axins.set_ylim(y1, y2)
+    axins.grid(True, linestyle='--', alpha=0.35)
+    axins.spines['top'].set_visible(False); axins.spines['right'].set_visible(False)
+    axins.xaxis.set_major_locator(mtick.MaxNLocator(4, integer=True))
+    axins.xaxis.set_minor_locator(mtick.AutoMinorLocator(2))
+    axins.tick_params(labelsize=9)
+
+    # box zoom connectors (rectangle + links) — box draws behind lines
+    mark_inset(ax, axins, loc1=1, loc2=2, fc="none", ec="0.6", lw=1.1)
+
+    # SAVE paper-ready
+    _savefig('reward_compare.png')
+
+compare_mpc_rl(y_system, y_mpc, y_sp, avg_rewards, avg_rewards_, delta_t, dir_path, prefix_name="compare_reward_ndist")
+
+def compare_mpc_rl_disturbance(y_rl, y_mpc, y_sp, u_mpc, u_rl, avg_rewards_rl, avg_rewards_mpc, time_in_sub_episodes, delta_t):
+
+    y_ss = apply_min_max(steady_states["y_ss"], data_min[2:], data_max[2:])
+    y_sp = (y_sp + y_ss)
+    y_sp = (reverse_min_max(y_sp, data_min[2:], data_max[2:])).T
+
+    # --- Plot the "last portion" (time_in_sub_episodes) ---
+    # Convert those steps to their own time axis
+    time_plot_sub = np.linspace(0, time_in_sub_episodes * delta_t, time_in_sub_episodes)
+    start_idx = -800
+
+    plt.figure(figsize=(10, 8))
+
+    # Subplot 1: last portion, y[:, 0]
+    plt.subplot(2, 1, 1)
+    plt.plot(time_plot_sub, y_rl[start_idx:, 0], 'b-', lw=2, label=r'RL')
+    plt.plot(time_plot_sub, y_mpc[start_idx:, 0], 'k--', lw=2, label=r'MPC')
+    plt.step(time_plot_sub,
+             y_sp[0, start_idx:],
+             'r--', lw=2, label=r'Setpoint')
+    plt.ylabel('Tray 24 Ethan Comp.', fontsize=18)
+    plt.grid(True)
+    plt.legend(loc='best', fontsize=16)
+
+    # Subplot 2: last portion, y[:, 1]
+    plt.subplot(2, 1, 2)
+    plt.plot(time_plot_sub, y_rl[start_idx:, 1], 'b-', lw=2, label=r'RL')
+    plt.plot(time_plot_sub, y_mpc[start_idx:, 1], 'k--', lw=2, label=r'MPC')
+    plt.step(time_plot_sub,
+             y_sp[1, start_idx:],
+             'r--', lw=2, label=r'Setpoint')
+    plt.ylabel('Tray 85 Temp', fontsize=18)
+    plt.xlabel(r'Time (hour)', fontsize=18)
+    plt.grid(True)
+    plt.legend(loc='best', fontsize=16)
+
+    # Ticks
+    plt.subplot(2, 1, 1)
+    plt.tick_params(axis='both', labelsize=16)
+    plt.subplot(2, 1, 2)
+    plt.tick_params(axis='both', labelsize=16)
+
+    plt.tight_layout()
+    plt.show()
+    
+
+    # Subplot 2: Avg rewards
+    plt.figure(figsize=(10, 6))
+
+    plt.plot(np.arange(1, len(avg_rewards_rl) + 1), avg_rewards_rl, 'bo-', lw=2, label='Reward RL per Episode')
+    # plt.plot(np.arange(1, len(avg_rewards_mpc) + 1), avg_rewards_mpc, 'ro-', lw=2, label='Reward MPC per Episode')
+    plt.hlines(avg_rewards_mpc[-1], xmin=0, xmax=np.arange(1, len(avg_rewards_rl) + 1)[-1], linestyles='--', lw=2, label='Reward MPC per Episode')
+    plt.ylabel(r'Avg. Reward', fontsize=16, fontweight='bold')
+    plt.xlabel(r'Episode #', fontsize=16, fontweight='bold')
+    plt.xticks(fontsize=14, fontweight='bold')
+    # plt.hlines(-3.0233827500429884)
+    # plt.xticks(np.arange(1, len(avg_rewards) + 1), fontsize=14, fontweight='bold')
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5)
+    plt.legend(loc='best', fontsize=16)
+    
+    # Subplot 3: Manipulated inputs
+    plt.figure(figsize=(10, 8))
+
+    # First subplot
+    plt.subplot(2, 1, 1)
+    plt.plot(time_plot_sub, u_rl[start_idx:, 0], 'b-', lw=2, label=r'RL')
+    plt.plot(time_plot_sub, u_mpc[start_idx:, 0], 'k--', lw=2, label=r'MPC')
+    plt.ylabel(r'$\mathbf{R}$ (kg/h)', fontsize=18)
+    plt.grid(True)
+    plt.legend(loc='best', fontsize=16)
+
+    # Second subplot
+    plt.subplot(2, 1, 2)
+    plt.plot(time_plot_sub, u_rl[start_idx:, 1], 'b-', lw=2, label=r'RL')
+    plt.plot(time_plot_sub, u_mpc[start_idx:, 1], 'k--', lw=2, label=r'MPC')
+    plt.ylabel(r'$\mathbf{Q}_R$ (Gj/h)', fontsize=18)
+    plt.xlabel(r'$\mathbf{Time}$ (hour)', fontsize=18)
+    plt.grid(True)
+    plt.legend(loc='best', fontsize=16)
+
+    plt.subplot(2, 1, 1)
+    plt.tick_params(axis='both', labelsize=16)
+
+    plt.subplot(2, 1, 2)
+    plt.tick_params(axis='both', labelsize=16)
+
+    plt.tight_layout()
+    plt.show()
+
+    plt.show()
+
+save_path = os.path.join(dir_path, "mpc_results_RL_compare.pickle")
+with open(save_path, 'rb') as file:
+    mpc_results = pickle.load(file)
+y_mpc = mpc_results["y_mpc"]
+u_mpc = mpc_results["u_mpc"]
+xhatdhat_mpc = mpc_results["xhatdhat"]
+avg_rewards_mpc = mpc_results["avg_rewards"]
+compare_mpc_rl_disturbance(y_system, y_mpc, y_sp, u_mpc, u_rl, avg_rewards, avg_rewards_mpc, time_in_sub_episodes, delta_t)
+
+
+

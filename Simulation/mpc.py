@@ -1,9 +1,11 @@
+import os
 import numpy as np
 import control
 from scipy import signal
 import scipy.optimize as spo
 import matplotlib.pyplot as plt
 from Simulation.sys_ids import apply_min_max, reverse_min_max
+from rl_utils.rewards import make_reward_fn_relative_QR, make_reward_fn_quadratic
 
 plt.rcParams.update({'font.size': 16, 'font.weight': 'bold'})
 
@@ -154,7 +156,8 @@ def generate_setpoints(y_sp_scenario, n_tests, set_points_len):
 
 def run_mpc(system, MPC_obj, y_sp_scenario, n_tests, set_points_len,
             steady_states, IC_opt, bnds, cons,
-            Q1_penalty, Q2_penalty, R1_penalty, R2_penalty, L, data_min, data_max, n_inputs):
+            Q1_penalty, Q2_penalty, R1_penalty, R2_penalty, L, data_min, data_max, n_inputs,
+            alt_reward_fn=None, alt_log_path=None):
     # defining setpoints
     y_sp, nFE, sub_episodes_changes_dict, time_in_sub_episodes = generate_setpoints(y_sp_scenario, n_tests,
                                                                                     set_points_len)
@@ -173,6 +176,7 @@ def run_mpc(system, MPC_obj, y_sp_scenario, n_tests, set_points_len,
 
     # Reward recording
     rewards = np.zeros(nFE)
+    alt_rewards = [] if alt_reward_fn is not None else None
     avg_rewards = []
 
     for i in range(nFE):
@@ -221,6 +225,14 @@ def run_mpc(system, MPC_obj, y_sp_scenario, n_tests, set_points_len,
         # Reward Calculation
         reward = - (Q1_penalty * delta_y[0] ** 2 + Q2_penalty * delta_y[1] ** 2 +
                     R1_penalty * delta_u[0] ** 2 + R2_penalty * delta_u[1] ** 2)
+        if alt_reward_fn is not None:
+            y_ss_scaled = apply_min_max(steady_states["y_ss"], data_min[n_inputs:], data_max[n_inputs:])
+            y_sp_phys = reverse_min_max(y_sp[i, :] + y_ss_scaled, data_min[n_inputs:], data_max[n_inputs:])
+            try:
+                alt_r = alt_reward_fn(delta_y, delta_u, y_sp_phys)
+            except TypeError:
+                alt_r = alt_reward_fn(delta_y, delta_u)
+            alt_rewards.append(alt_r)
 
         # Record rewards
         rewards[i] = reward
@@ -234,6 +246,10 @@ def run_mpc(system, MPC_obj, y_sp_scenario, n_tests, set_points_len,
             print('Sub_Episode : ', sub_episodes_changes_dict[i], ' | avg. reward :', avg_rewards[-1])
 
     u_mpc = reverse_min_max(u_mpc, data_min[:n_inputs], data_max[:n_inputs])
+
+    if alt_reward_fn is not None and alt_log_path is not None:
+        os.makedirs(os.path.dirname(alt_log_path), exist_ok=True)
+        np.save(alt_log_path, np.array(alt_rewards, dtype=float))
 
     return y_mpc, u_mpc, avg_rewards, rewards, xhatdhat, nFE, time_in_sub_episodes, y_sp, yhat
 
