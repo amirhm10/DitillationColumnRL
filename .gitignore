@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data / logs / checkpoints
+Data/
+Figures/
+logs/
+runs/
+wandb/
+checkpoints/
+*.pkl
+*.npz
+*.csv
+*.h5
+
+# IDE
+.idea/
